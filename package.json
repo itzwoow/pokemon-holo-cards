@@ -1,0 +1,33 @@
+{
+  "name": "pokemon-holo-cards",
+  "version": "1.0.0",
+  "description": "Animated holographic Pokémon card effects for React — all rarities, flip zoom animation",
+  "author": "itzwoow",
+  "license": "MIT",
+  "keywords": ["pokemon", "holographic", "tcg", "react", "animation"],
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "react": ">=17",
+    "react-dom": ">=17"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}
