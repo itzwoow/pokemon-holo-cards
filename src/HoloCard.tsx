@@ -1,9 +1,10 @@
-import React, { useRef, useEffect, useCallback } from "react";
+import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
+import { fetchPokemonCard, HoloCardData } from "./api";
 
 export interface HoloCardProps {
-  /** Card front image URL */
-  imageUrl: string;
-  /** Card name (for alt text) */
+  /** Card front image URL (required unless `id` is provided) */
+  imageUrl?: string;
+  /** Card name (also used for alt text) */
   name?: string;
   /** Pokémon TCG API rarity string */
   rarity?: string;
@@ -13,12 +14,27 @@ export interface HoloCardProps {
   supertype?: string;
   /** Set ID (e.g. "swsh4") — used to build CDN foil URLs */
   setId?: string;
-  /** Card number within set (e.g. "025") */
+  /** Card number within set (e.g. "050") */
   cardNumber?: string;
-  /** Called when card is clicked */
-  onClick?: (e: React.MouseEvent) => void;
+  /**
+   * Pokémon TCG API card id (e.g. "swsh4-50"). When provided, the card data
+   * is fetched automatically — no other props required.
+   */
+  id?: string;
+  /** Optional TCG API key for higher rate limits */
+  apiKey?: string;
+  /** Called when card is clicked (fires regardless of zoom) */
+  onClick?: (e: React.MouseEvent | React.KeyboardEvent) => void;
+  /** Called when API fetch fails (only when `id` is used) */
+  onFetchError?: (err: Error) => void;
   className?: string;
   style?: React.CSSProperties;
+  /** Disable click-to-zoom event dispatch (used internally by CardZoomModal) */
+  disableZoom?: boolean;
+  /** Rendered while card data is being fetched via `id` */
+  loadingFallback?: React.ReactNode;
+  /** Rendered if image/API fails to load */
+  errorFallback?: React.ReactNode;
 }
 
 class Spring {
@@ -47,22 +63,48 @@ class Spring {
   snap(v: number) { this.target = v; this.value = v; this.velocity = 0; }
 }
 
+const CDN = "https://poke-holo.b-cdn.net";
+
 const RARITY_MAP: Record<string, string> = {
   "rare holo": "rare holo",
   "rare holo v": "rare holo v",
   "rare holo vmax": "rare holo vmax",
   "rare holo vstar": "rare holo vstar",
+  "rare holo vunion": "rare holo vunion",
+  "rare holo cosmos": "rare holo cosmos",
   "rare ultra": "rare ultra",
   "rare rainbow": "rare rainbow",
   "rare secret": "rare secret",
   "amazing rare": "amazing rare",
   "radiant rare": "radiant rare",
-  "rare holo ex": "rare holo v",
-  "double rare": "rare holo v",
+  "rare rainbow alt": "rare rainbow alt",
+  "rare shiny": "rare shiny",
+  "rare shiny v": "rare shiny v",
+  "rare shiny vmax": "rare shiny vmax",
+  "trainer gallery rare holo": "trainer gallery rare holo",
+  "common reverse holo": "common reverse holo",
+  "uncommon reverse holo": "uncommon reverse holo",
+  "rare reverse holo": "rare reverse holo",
+  // ── Scarlet & Violet era ──────────────────────────────────────────────────
+  // Double Rare = ex Pokémon (SV diagonal slanted sheen + sparkle)
+  "double rare": "double rare",
+  // Ultra Rare = ex full-art / trainer full-art (etched sunpillar)
   "ultra rare": "rare ultra",
-  "special illustration rare": "rare rainbow",
+  // Illustration Rare = full-bleed painted art (full-art sunpillar, NOT basic holo)
+  "illustration rare": "rare holo v",
+  // Special Illustration Rare = premium full-art (soft pearlescent shimmer, NOT harsh rainbow bars)
+  "special illustration rare": "rare rainbow alt",
+  // Hyper Rare = gold textured secret (etched swsecret)
   "hyper rare": "rare secret",
-  "illustration rare": "rare holo",
+  // Shiny Rare = shiny pokemon in SV sets (etched sunpillar, no sv-prefix card numbers)
+  "shiny rare": "rare shiny v",
+  // Shiny Ultra Rare = shiny ex full-arts (etched swsecret)
+  "shiny ultra rare": "rare shiny vmax",
+  // ACE SPEC Rare = special item cards (etched sunpillar)
+  "ace spec rare": "rare ultra",
+  // ── SWSH era aliases ──────────────────────────────────────────────────────
+  "rare holo ex": "rare holo v",
+  "basic v": "rare holo v",
 };
 
 function getCssRarity(rarity?: string): string | null {
@@ -70,54 +112,123 @@ function getCssRarity(rarity?: string): string | null {
   return RARITY_MAP[rarity.toLowerCase()] ?? null;
 }
 
-function isTrainerGallery(cardNumber?: string, subtypes?: string[]): boolean {
-  if (subtypes?.some(s => s.toLowerCase().includes("trainer gallery"))) return true;
-  if (!cardNumber) return false;
-  const n = parseInt(cardNumber.replace(/\D/g, ""), 10);
-  return n >= 180 && n <= 230;
+interface FoilResult {
+  foilUrl: string;
+  maskUrl: string;
 }
 
 function buildFoilUrls(
   setId: string,
   cardNumber: string,
   cssRarity: string,
-  tg: boolean
-): { foilUrl: string; maskUrl: string } | null {
-  if (!setId.startsWith("swsh") && !setId.startsWith("sv")) return null;
-  const CDN = "https://poke-holo.b-cdn.net";
-  const num = cardNumber.padStart(3, "0");
+  subtypes?: string[],
+): FoilResult | null {
+  const rawSet = setId.toLowerCase();
+  const fSet = rawSet.replace(/(tg|gg|sv)/, "");
 
-  let etch = "reverse";
-  let style = "holo";
+  if (!fSet.startsWith("swsh") && !rawSet.startsWith("sv") && rawSet !== "pgo") return null;
 
-  if (tg && cssRarity === "rare holo vmax") { etch = "etched"; style = "rainbow-alt"; }
-  else if (cssRarity === "rare holo vstar") { etch = "etched"; style = "cosmos"; }
-  else if (cssRarity === "rare holo vmax") { etch = "etched"; style = "sunpillar"; }
-  else if (cssRarity === "rare holo v") { etch = "holo"; style = "sunpillar"; }
-  else if (cssRarity === "rare rainbow") { etch = "etched"; style = "rainbow"; }
-  else if (cssRarity === "rare secret") { etch = "etched"; style = "rainbow"; }
-  else if (cssRarity === "rare ultra") { etch = "holo"; style = "sunpillar"; }
+  const fRarity = cssRarity.toLowerCase();
+  const fNumber = cardNumber.toLowerCase().replace("swsh", "").padStart(3, "0");
 
-  const foilUrl = `${CDN}/foils/${setId}/foils/upscaled/${num}_foil_${etch}_${style}_2x.webp`;
-  const maskUrl = `${CDN}/foils/${setId}/masks/upscaled/${num}_foil_${etch}_${style}_2x.webp`;
+  const isTg = !!cardNumber.match(/^[tg]g/i);
+  const isShinyVault = cardNumber.toLowerCase().startsWith("sv");
+  const hasVmax = !!subtypes?.some(s => s.toLowerCase() === "vmax");
+
+  let etch = "holo";
+  let style = "reverse";
+
+  if (fRarity === "rare holo") { style = "swholo"; }
+  if (fRarity === "double rare") { etch = "holo"; style = "sunpillar"; }
+  if (fRarity === "rare holo cosmos") { style = "cosmos"; }
+  if (fRarity === "radiant rare") { etch = "etched"; style = "radiantholo"; }
+  if (fRarity === "rare holo v" || fRarity === "rare holo vunion" || fRarity === "basic v") {
+    etch = "holo"; style = "sunpillar";
+  }
+  if (fRarity === "rare holo vmax" || fRarity === "rare ultra" || fRarity === "rare holo vstar") {
+    etch = "etched"; style = "sunpillar";
+  }
+  if (fRarity === "amazing rare" || fRarity === "rare rainbow" || fRarity === "rare secret") {
+    etch = "etched"; style = "swsecret";
+  }
+  // rare rainbow alt covers both SWSH alt-arts AND SV Special Illustration Rares
+  if (fRarity === "rare rainbow alt") {
+    etch = "etched"; style = hasVmax ? "swsecret" : "sunpillar";
+  }
+  if (fRarity === "trainer gallery rare holo") {
+    etch = "holo"; style = "rainbow";
+  }
+  // SV-era shiny rares (card numbers are regular, not sv-prefixed)
+  if (fRarity === "rare shiny v") { etch = "etched"; style = "sunpillar"; }
+  if (fRarity === "rare shiny vmax") { etch = "etched"; style = "swsecret"; }
+
+  // SWSH Shining Fates shiny vault (card numbers start with "sv")
+  if (isShinyVault) {
+    etch = "etched"; style = "sunpillar";
+    if (fRarity === "rare shiny vmax" || fRarity === "rare holo vmax") {
+      style = "swsecret";
+    }
+  }
+
+  if (isTg) {
+    etch = "holo"; style = "rainbow";
+    if (fRarity.includes("rare holo v") || fRarity.includes("rare ultra")) {
+      etch = "etched"; style = "sunpillar";
+    }
+    if (fRarity.includes("rare secret")) {
+      etch = "etched"; style = "swsecret";
+    }
+  }
+
+  const foilUrl = `${CDN}/foils/${fSet}/foils/upscaled/${fNumber}_foil_${etch}_${style}_2x.webp`;
+  const maskUrl = `${CDN}/foils/${fSet}/masks/upscaled/${fNumber}_foil_${etch}_${style}_2x.webp`;
   return { foilUrl, maskUrl };
 }
 
-export const HoloCard: React.FC<HoloCardProps> = ({
-  imageUrl,
-  name = "Pokémon Card",
-  rarity,
-  subtypes,
-  supertype,
-  setId,
-  cardNumber,
-  onClick,
-  className = "",
-  style: styleProp,
-}) => {
+export const HoloCard: React.FC<HoloCardProps> = (props) => {
+  const {
+    id: cardId,
+    apiKey,
+    onClick,
+    onFetchError,
+    className = "",
+    style: styleProp,
+    disableZoom = false,
+    loadingFallback,
+    errorFallback,
+  } = props;
+
+  // If `id` prop is set, fetch from TCG API and merge the result over passed props.
+  const [fetched, setFetched] = useState<HoloCardData | null>(null);
+  const [fetchError, setFetchError] = useState<Error | null>(null);
+  const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    if (!cardId) { setFetched(null); setFetchError(null); return; }
+    const controller = new AbortController();
+    let cancelled = false;
+    fetchPokemonCard(cardId, { apiKey, signal: controller.signal })
+      .then(data => { if (!cancelled) setFetched(data); })
+      .catch(err => {
+        if (cancelled || err.name === "AbortError") return;
+        setFetchError(err);
+        onFetchError?.(err);
+      });
+    return () => { cancelled = true; controller.abort(); };
+  }, [cardId, apiKey, onFetchError]);
+
+  const imageUrl = fetched?.imageUrl ?? props.imageUrl ?? "";
+  const name = fetched?.name ?? props.name ?? "Pokémon Card";
+  const rarity = fetched?.rarity ?? props.rarity;
+  const subtypes = fetched?.subtypes ?? props.subtypes;
+  const supertype = fetched?.supertype ?? props.supertype;
+  const setId = fetched?.setId ?? props.setId;
+  const cardNumber = fetched?.cardNumber ?? props.cardNumber;
+
   const cardRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number>(0);
   const activeRef = useRef(false);
+  const [maskLoaded, setMaskLoaded] = useState(false);
 
   const springs = useRef({
     rotX: new Spring(0.066, 0.25, 0),
@@ -129,10 +240,22 @@ export const HoloCard: React.FC<HoloCardProps> = ({
   });
 
   const cssRarity = getCssRarity(rarity);
-  const tg = isTrainerGallery(cardNumber, subtypes);
-  const foilUrls = cssRarity && setId && cardNumber
-    ? buildFoilUrls(setId, cardNumber, cssRarity, tg)
-    : null;
+  const foilUrls = useMemo(
+    () => (cssRarity && setId && cardNumber
+      ? buildFoilUrls(setId, cardNumber, cssRarity, subtypes)
+      : null),
+    [cssRarity, setId, cardNumber, subtypes],
+  );
+
+  useEffect(() => {
+    if (!foilUrls?.maskUrl || typeof window === "undefined") { setMaskLoaded(false); return; }
+    let cancelled = false;
+    const img = new window.Image();
+    img.onload = () => { if (!cancelled) setMaskLoaded(true); };
+    img.onerror = () => { if (!cancelled) setMaskLoaded(false); };
+    img.src = foilUrls.maskUrl;
+    return () => { cancelled = true; };
+  }, [foilUrls?.maskUrl]);
 
   const applyVars = useCallback(() => {
     const el = cardRef.current;
@@ -167,18 +290,18 @@ export const HoloCard: React.FC<HoloCardProps> = ({
     }
   }, []);
 
-  const handleMouseMove = useCallback((e: MouseEvent) => {
+  const updateFromPoint = useCallback((clientX: number, clientY: number) => {
     const el = cardRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const px = (e.clientX - rect.left) / rect.width;
-    const py = (e.clientY - rect.top) / rect.height;
+    const px = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const py = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
 
     const s = springs.current;
-    s.rotX.set((py - 0.5) * -24);
-    s.rotY.set((px - 0.5) * 24);
-    s.bgX.set(40 + px * 20);
-    s.bgY.set(40 + py * 20);
+    s.rotX.set(-((px - 0.5) * 100) / 3.5);
+    s.rotY.set(((py - 0.5) * 100) / 3.5);
+    s.bgX.set(37 + px * 26);
+    s.bgY.set(33 + py * 34);
     s.glareX.set(px * 100);
     s.glareY.set(py * 100);
     el.style.setProperty("--card-opacity", "1");
@@ -187,7 +310,11 @@ export const HoloCard: React.FC<HoloCardProps> = ({
     frameRef.current = requestAnimationFrame(applyVars);
   }, [applyVars]);
 
-  const handleMouseLeave = useCallback(() => {
+  const handlePointerMove = useCallback((e: PointerEvent) => {
+    updateFromPoint(e.clientX, e.clientY);
+  }, [updateFromPoint]);
+
+  const handlePointerLeave = useCallback(() => {
     const el = cardRef.current;
     if (!el) return;
     activeRef.current = false;
@@ -199,72 +326,103 @@ export const HoloCard: React.FC<HoloCardProps> = ({
     frameRef.current = requestAnimationFrame(applyVars);
   }, [applyVars]);
 
-  const handleMouseEnter = useCallback(() => {
+  const handlePointerEnter = useCallback(() => {
     activeRef.current = true;
   }, []);
 
   useEffect(() => {
     const el = cardRef.current;
-    if (!el || !cssRarity) return;
-    el.addEventListener("mousemove", handleMouseMove);
-    el.addEventListener("mouseleave", handleMouseLeave);
-    el.addEventListener("mouseenter", handleMouseEnter);
+    if (!el) return;
+    el.addEventListener("pointermove", handlePointerMove);
+    el.addEventListener("pointerleave", handlePointerLeave);
+    el.addEventListener("pointercancel", handlePointerLeave);
+    el.addEventListener("pointerenter", handlePointerEnter);
     return () => {
-      el.removeEventListener("mousemove", handleMouseMove);
-      el.removeEventListener("mouseleave", handleMouseLeave);
-      el.removeEventListener("mouseenter", handleMouseEnter);
+      el.removeEventListener("pointermove", handlePointerMove);
+      el.removeEventListener("pointerleave", handlePointerLeave);
+      el.removeEventListener("pointercancel", handlePointerLeave);
+      el.removeEventListener("pointerenter", handlePointerEnter);
       cancelAnimationFrame(frameRef.current);
     };
-  }, [cssRarity, handleMouseMove, handleMouseLeave, handleMouseEnter]);
+  }, [handlePointerMove, handlePointerLeave, handlePointerEnter]);
+
+  const triggerZoom = useCallback(() => {
+    const el = cardRef.current;
+    if (!el || disableZoom) return;
+    el.dispatchEvent(new CustomEvent("holo-card-zoom", {
+      bubbles: true,
+      detail: {
+        imageUrl, name, rarity, subtypes, supertype, setId, cardNumber,
+        rect: el.getBoundingClientRect(),
+      },
+    }));
+  }, [imageUrl, name, rarity, subtypes, supertype, setId, cardNumber, disableZoom]);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
-    const el = cardRef.current;
-    if (el) {
-      el.dispatchEvent(new CustomEvent("holo-card-zoom", {
-        bubbles: true,
-        detail: {
-          imageUrl,
-          name,
-          rarity: cssRarity,
-          rect: el.getBoundingClientRect(),
-        },
-      }));
-    }
+    triggerZoom();
     onClick?.(e);
-  }, [imageUrl, name, cssRarity, onClick]);
+  }, [triggerZoom, onClick]);
 
-  if (!cssRarity) {
-    return (
-      <img
-        src={imageUrl}
-        alt={name}
-        className={className}
-        style={styleProp}
-        onClick={onClick}
-      />
-    );
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      triggerZoom();
+      onClick?.(e);
+    }
+  }, [triggerZoom, onClick]);
+
+  // Stable per-mount random seeds (cosmos pattern offset)
+  const { seedX, seedY, cosmosX, cosmosY } = useMemo(() => {
+    const sx = Math.random();
+    const sy = Math.random();
+    return {
+      seedX: sx, seedY: sy,
+      cosmosX: Math.floor(sx * 734),
+      cosmosY: Math.floor(sy * 1280),
+    };
+  }, []);
+
+  // Loading state when fetching by id
+  if (cardId && !fetched && !fetchError) {
+    return <>{loadingFallback ?? <div className={`holo-card-loading ${className}`} style={styleProp} aria-busy="true" aria-label="Loading card" />}</>;
   }
 
+  // Fetch error
+  if (fetchError) {
+    return <>{errorFallback ?? <div className={`holo-card-error ${className}`} style={styleProp} role="img" aria-label="Card unavailable" />}</>;
+  }
+
+  // No image URL at all — nothing we can render
+  if (!imageUrl) {
+    return <>{errorFallback ?? null}</>;
+  }
+
+  // Image failed to load
+  if (imgError) {
+    return <>{errorFallback ?? <div className={`holo-card-error ${className}`} style={styleProp} role="img" aria-label={`${name} failed to load`} />}</>;
+  }
+
+  // Unknown/common rarity — use "common" as fallback so all cards get tilt + glare
+  const effectiveRarity = cssRarity ?? "common";
+
   const dataAttrs: Record<string, string> = {
-    "data-rarity": cssRarity,
+    "data-rarity": effectiveRarity,
   };
   if (supertype) dataAttrs["data-supertype"] = supertype.toLowerCase();
-  if (tg) dataAttrs["data-trainer-gallery"] = "true";
+  if (subtypes?.length) dataAttrs["data-subtypes"] = subtypes.join(" ").toLowerCase();
+  if (cardNumber?.match(/^[tg]g/i)) dataAttrs["data-trainer-gallery"] = "true";
 
-  const foilStyle = foilUrls
-    ? {
-        "--foil-image": `url('${foilUrls.foilUrl}')`,
-        "--mask-image-url": `url('${foilUrls.maskUrl}')`,
-      } as React.CSSProperties
+  const foilStyle = foilUrls && maskLoaded
+    ? ({
+        "--foil": `url('${foilUrls.foilUrl}')`,
+        "--mask": `url('${foilUrls.maskUrl}')`,
+      } as React.CSSProperties)
     : {};
-
-  const seedX = Math.floor(Math.random() * 100);
-  const seedY = Math.floor(Math.random() * 100);
 
   return (
     <div
       ref={cardRef}
-      className={`holo-card ${className}`}
+      className={`holo-card${maskLoaded ? " masked" : ""} ${className}`.trim()}
       style={{
         "--card-opacity": "0",
         "--rotate-x": "0deg",
@@ -278,17 +436,26 @@ export const HoloCard: React.FC<HoloCardProps> = ({
         "--pointer-from-left": "0.5",
         "--seedx": `${seedX}`,
         "--seedy": `${seedY}`,
+        "--cosmosbg": `${cosmosX}px ${cosmosY}px`,
+        cursor: disableZoom ? "default" : "pointer",
+        touchAction: "none",
         ...foilStyle,
         ...styleProp,
       } as React.CSSProperties}
       {...dataAttrs}
       onClick={handleClick}
+      onKeyDown={handleKeyDown}
+      role={disableZoom ? undefined : "button"}
+      tabIndex={disableZoom ? undefined : 0}
+      aria-label={`${name}${rarity ? `, ${rarity}` : ""}`}
     >
       <img
         className="holo-card__img"
         src={imageUrl}
         alt={name}
         draggable={false}
+        onLoad={e => (e.currentTarget as HTMLImageElement).classList.add("loaded")}
+        onError={() => setImgError(true)}
       />
       <div className="holo-card__shine" />
       <div className="holo-card__glare" />
