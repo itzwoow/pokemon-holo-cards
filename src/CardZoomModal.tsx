@@ -1,10 +1,15 @@
 import React, { useEffect, useRef, useCallback, useState } from "react";
 import { createPortal } from "react-dom";
+import { HoloCard } from "./HoloCard";
 
 interface ZoomDetail {
   imageUrl: string;
   name: string;
-  rarity: string | null;
+  rarity?: string;
+  subtypes?: string[];
+  supertype?: string;
+  setId?: string;
+  cardNumber?: string;
   rect: DOMRect;
 }
 
@@ -15,12 +20,14 @@ const CARD_BACK = "https://tcg.pokemon.com/assets/img/global/tcg-card-back-2x.jp
 export const CardZoomModal: React.FC = () => {
   const [phase, setPhase] = useState<Phase>("idle");
   const [card, setCard] = useState<ZoomDetail | null>(null);
+  const [targetBox, setTargetBox] = useState<{ w: number; h: number; left: number; top: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const close = useCallback(() => {
     setPhase("idle");
     setCard(null);
+    setTargetBox(null);
   }, []);
 
   const runFlip = useCallback((detail: ZoomDetail) => {
@@ -49,6 +56,8 @@ export const CardZoomModal: React.FC = () => {
       stage.style.top = `${fromCy}px`;
       stage.style.width = `${detail.rect.width}px`;
       stage.style.height = `${detail.rect.height}px`;
+      stage.style.marginLeft = `${-detail.rect.width / 2}px`;
+      stage.style.marginTop = `${-detail.rect.height / 2}px`;
 
       const anim = stage.animate(
         [
@@ -73,8 +82,13 @@ export const CardZoomModal: React.FC = () => {
       );
 
       anim.onfinish = () => {
-        stage.style.transform = `translate(${dx}px,${dy}px) scale(${scale})`;
         stage.getAnimations().forEach(a => a.cancel());
+        setTargetBox({
+          w: targetW,
+          h: targetH,
+          left: (vw - targetW) / 2,
+          top: (vh - targetH) / 2,
+        });
         setPhase("open");
       };
     });
@@ -98,6 +112,7 @@ export const CardZoomModal: React.FC = () => {
   }, [phase, close]);
 
   if (phase === "idle" || !card) return null;
+  if (typeof document === "undefined") return null;
 
   return createPortal(
     <div
@@ -113,59 +128,84 @@ export const CardZoomModal: React.FC = () => {
       }}
       onClick={phase === "open" ? close : undefined}
     >
-      <div
-        ref={stageRef}
-        className="holo-zoom-stage"
-        style={{
-          position: "absolute",
-          transformOrigin: "center center",
-          transformStyle: "preserve-3d",
-          pointerEvents: "none",
-        }}
-      >
+      {phase === "flipping" && (
         <div
+          ref={stageRef}
+          className="holo-zoom-stage"
           style={{
-            width: "100%",
-            height: "100%",
-            position: "relative",
+            position: "absolute",
+            transformOrigin: "center center",
             transformStyle: "preserve-3d",
+            pointerEvents: "none",
           }}
         >
-          <img
-            src={card.imageUrl}
-            alt={card.name}
+          <div
             style={{
-              position: "absolute",
-              inset: 0,
               width: "100%",
               height: "100%",
-              objectFit: "contain",
-              borderRadius: "4.5% / 3.2%",
-              backfaceVisibility: "hidden",
-              WebkitBackfaceVisibility: "hidden",
-              draggable: false,
+              position: "relative",
+              transformStyle: "preserve-3d",
             }}
-            draggable={false}
-          />
-          <img
-            src={CARD_BACK}
-            alt="card back"
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-              borderRadius: "4.5% / 3.2%",
-              backfaceVisibility: "hidden",
-              WebkitBackfaceVisibility: "hidden",
-              transform: "rotateY(180deg)",
-              draggable: false,
-            }}
-            draggable={false}
+          >
+            <img
+              src={card.imageUrl}
+              alt={card.name}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "contain",
+                borderRadius: "4.5% / 3.2%",
+                backfaceVisibility: "hidden",
+                WebkitBackfaceVisibility: "hidden",
+              }}
+              draggable={false}
+            />
+            <img
+              src={CARD_BACK}
+              alt="card back"
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "contain",
+                borderRadius: "4.5% / 3.2%",
+                backfaceVisibility: "hidden",
+                WebkitBackfaceVisibility: "hidden",
+                transform: "rotateY(180deg)",
+              }}
+              draggable={false}
+            />
+          </div>
+        </div>
+      )}
+
+      {phase === "open" && targetBox && (
+        <div
+          style={{
+            position: "absolute",
+            left: targetBox.left,
+            top: targetBox.top,
+            width: targetBox.w,
+            height: targetBox.h,
+          }}
+          onClick={e => e.stopPropagation()}
+        >
+          <HoloCard
+            imageUrl={card.imageUrl}
+            name={card.name}
+            rarity={card.rarity}
+            subtypes={card.subtypes}
+            supertype={card.supertype}
+            setId={card.setId}
+            cardNumber={card.cardNumber}
+            disableZoom
+            style={{ width: "100%", height: "100%", cursor: "default" }}
           />
         </div>
-      </div>
+      )}
 
       {phase === "open" && (
         <button

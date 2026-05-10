@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { fetchPokemonCard, HoloCardData } from "./api";
+import customMasksJson from "./custom-masks.json";
 
 export interface HoloCardProps {
   /** Card front image URL (required unless `id` is provided) */
@@ -65,6 +66,14 @@ class Spring {
 
 const CDN = "https://poke-holo.b-cdn.net";
 
+const customMasks = customMasksJson as Record<string, string>;
+
+function getCustomMaskUrl(setId?: string, cardNumber?: string): string | null {
+  if (!setId || !cardNumber) return null;
+  const key = `${setId.toLowerCase()}-${cardNumber.toLowerCase().padStart(3, "0")}`;
+  return customMasks[key] ?? null;
+}
+
 const RARITY_MAP: Record<string, string> = {
   "rare holo": "rare holo",
   "rare holo v": "rare holo v",
@@ -90,12 +99,12 @@ const RARITY_MAP: Record<string, string> = {
   "double rare": "double rare",
   // Ultra Rare = ex full-art / trainer full-art (etched sunpillar)
   "ultra rare": "rare ultra",
-  // Illustration Rare = full-bleed painted art (full-art sunpillar, NOT basic holo)
-  "illustration rare": "rare holo v",
+  // Illustration Rare = full-bleed painted art (screen blend — gentler than color-dodge on full-art)
+  "illustration rare": "illustration rare",
   // Special Illustration Rare = premium full-art (soft pearlescent shimmer, NOT harsh rainbow bars)
   "special illustration rare": "rare rainbow alt",
-  // Hyper Rare = gold textured secret (etched swsecret)
-  "hyper rare": "rare secret",
+  // Hyper Rare = own CSS class (gold card, embossed UV texture)
+  "hyper rare": "hyper rare",
   // Shiny Rare = shiny pokemon in SV sets (etched sunpillar, no sv-prefix card numbers)
   "shiny rare": "rare shiny v",
   // Shiny Ultra Rare = shiny ex full-arts (etched swsecret)
@@ -105,11 +114,34 @@ const RARITY_MAP: Record<string, string> = {
   // ── SWSH era aliases ──────────────────────────────────────────────────────
   "rare holo ex": "rare holo v",
   "basic v": "rare holo v",
+  // ── SM era ────────────────────────────────────────────────────────────────
+  "rare holo gx": "rare holo v",          // GX Pokémon — same foil treatment as V
+  "rare shiny gx": "rare shiny vmax",     // Shiny GX (Hidden Fates shiny vault)
+  "rare prism star": "rare ultra",        // Prism Star full-arts
+  // ── DP / Platinum era ─────────────────────────────────────────────────────
+  "rare holo lv.x": "rare holo v",       // LV.X special evolutions
+  // ── HGSS era ──────────────────────────────────────────────────────────────
+  "rare prime": "rare prime",            // Prime cards — galaxy foil on artwork+border
+  "legend": "rare holo",                 // LEGEND paired cards
+  // ── XY era ────────────────────────────────────────────────────────────────
+  "rare break": "rare holo",             // BREAK evolution cards
+  // ── B&W era ───────────────────────────────────────────────────────────────
+  "rare ace": "rare ultra",              // ACE SPEC items
+  "black white rare": "rare holo",       // Standard holo from B&W sets
+  // ── EX / Neo era ──────────────────────────────────────────────────────────
+  "rare holo star": "rare holo",         // Star rares (★) from EX era
+  "rare shining": "rare holo",           // Shining Pokémon (Neo / SM shining)
+  // ── Special / Modern ──────────────────────────────────────────────────────
+  "mega hyper rare": "hyper rare",       // Gold variant (newest sets)
+  "classic collection": "rare ultra",    // Classic Collection (Celebrations / 151)
 };
 
 function getCssRarity(rarity?: string): string | null {
   if (!rarity) return null;
-  return RARITY_MAP[rarity.toLowerCase()] ?? null;
+  const lower = rarity.toLowerCase();
+  // Any "X reverse holo" → pass through directly; CSS matches via $= suffix selector
+  if (lower.endsWith(" reverse holo")) return lower;
+  return RARITY_MAP[lower] ?? null;
 }
 
 interface FoilResult {
@@ -151,6 +183,9 @@ function buildFoilUrls(
   if (fRarity === "amazing rare" || fRarity === "rare rainbow" || fRarity === "rare secret") {
     etch = "etched"; style = "swsecret";
   }
+  // Hyper Rare uses the same physical swsecret foil file from CDN,
+  // but its CSS effect is fully custom (gold, not rainbow).
+  if (fRarity === "hyper rare") { etch = "etched"; style = "swsecret"; }
   // rare rainbow alt covers both SWSH alt-arts AND SV Special Illustration Rares
   if (fRarity === "rare rainbow alt") {
     etch = "etched"; style = hasVmax ? "swsecret" : "sunpillar";
@@ -247,15 +282,19 @@ export const HoloCard: React.FC<HoloCardProps> = (props) => {
     [cssRarity, setId, cardNumber, subtypes],
   );
 
+  const customMaskUrl = getCustomMaskUrl(setId, cardNumber);
+  // Prefer CDN mask (SWSH/SV); fall back to custom mask for legacy sets
+  const activeMaskUrl = foilUrls?.maskUrl ?? customMaskUrl ?? null;
+
   useEffect(() => {
-    if (!foilUrls?.maskUrl || typeof window === "undefined") { setMaskLoaded(false); return; }
+    if (!activeMaskUrl || typeof window === "undefined") { setMaskLoaded(false); return; }
     let cancelled = false;
     const img = new window.Image();
     img.onload = () => { if (!cancelled) setMaskLoaded(true); };
     img.onerror = () => { if (!cancelled) setMaskLoaded(false); };
-    img.src = foilUrls.maskUrl;
+    img.src = activeMaskUrl;
     return () => { cancelled = true; };
-  }, [foilUrls?.maskUrl]);
+  }, [activeMaskUrl]);
 
   const applyVars = useCallback(() => {
     const el = cardRef.current;
@@ -412,10 +451,17 @@ export const HoloCard: React.FC<HoloCardProps> = (props) => {
   if (subtypes?.length) dataAttrs["data-subtypes"] = subtypes.join(" ").toLowerCase();
   if (cardNumber?.match(/^[tg]g/i)) dataAttrs["data-trainer-gallery"] = "true";
 
-  const foilStyle = foilUrls && maskLoaded
+  // Reverse holo: only set --mask (for border restriction), never --foil.
+  // The CDN foil file (_foil_holo_reverse_2x.webp) bleeds harsh lines across the full card
+  // when the CSS mask-image silently fails CORS in production. Grain is always used instead.
+  const isRhRarity = cssRarity?.endsWith("reverse holo") ?? false;
+  // Custom masks (legacy sets) have no CDN foil texture — only the mask is applied.
+  // CDN foil (SWSH/SV) is skipped for RH cards to prevent harsh texture bleed.
+  const hasCdnFoil = !!foilUrls?.foilUrl && !isRhRarity && !customMaskUrl;
+  const foilStyle = maskLoaded && activeMaskUrl
     ? ({
-        "--foil": `url('${foilUrls.foilUrl}')`,
-        "--mask": `url('${foilUrls.maskUrl}')`,
+        ...(hasCdnFoil ? { "--foil": `url('${foilUrls!.foilUrl}')` } : {}),
+        "--mask": `url('${activeMaskUrl}')`,
       } as React.CSSProperties)
     : {};
 
